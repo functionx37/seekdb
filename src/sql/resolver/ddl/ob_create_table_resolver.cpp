@@ -378,7 +378,9 @@ int ObCreateTableResolver::resolve(const ParseNode &parse_tree)
         }
         // put after parsing temporary table information settings, because it involves error checking for foreign key reference not supported by temporary tables
         if (OB_SUCC(ret)) {
-          if (OB_FAIL(resolve_index(table_element_list_node, index_node_position_list))) {
+          if (OB_FAIL(add_ai_hidden_columns(create_table_stmt->get_create_table_arg().schema_))) {
+          } else if (FALSE_IT(cur_column_id_ = create_table_stmt->get_create_table_arg().schema_.get_max_used_column_id())) {
+          } else if (OB_FAIL(resolve_index(table_element_list_node, index_node_position_list))) {
           } else if (OB_FAIL(resolve_foreign_key(table_element_list_node, foreign_key_node_position_list))) {
           } else if (OB_FAIL(resolve_table_level_constraint_for_mysql(table_element_list_node, table_level_constraint_list))) {
           } else { /* do nothing */ }

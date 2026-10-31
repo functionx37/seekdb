@@ -4,6 +4,38 @@ load("//bazel:defs.bzl", "cc_library")
 package(default_testonly = True)
 
 cc_library(
+    name = "ai_column_schema_cases",
+    srcs = ["schema/test_ai_column_schema.cpp"],
+    alwayslink = True,
+    deps = ["//bazel/third_party:gtest", "//src/share:schema_entities"],
+)
+
+cc_test(
+    name = "test_ai_column_schema",
+    size = "small",
+    linkstatic = True,
+    features = ["-static_cpp_runtime", "-static_link_cpp_runtimes"],
+    deps = [":ai_column_schema_cases", "//src/observer:liboceanbase"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+cc_library(
+    name = "text_analysis_cases",
+    srcs = ["test_text_analysis.cpp"],
+    alwayslink = True,
+    deps = ["//bazel/third_party:gtest", "//src/share:text_analysis"],
+)
+
+cc_test(
+    name = "test_text_analysis",
+    size = "small",
+    linkstatic = True,
+    features = ["-static_cpp_runtime", "-static_link_cpp_runtimes"],
+    deps = [":text_analysis_cases", "//src/observer:liboceanbase"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+cc_library(
     name = "ddl_column_name_cases",
     srcs = ["test_ddl_column_name.cpp"],
     alwayslink = True,

@@ -26,6 +26,10 @@
 
 namespace oceanbase
 {
+namespace common
+{
+class ObMySQLTransaction;
+}
 namespace share
 {
 namespace schema

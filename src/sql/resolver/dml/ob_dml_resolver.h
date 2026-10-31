@@ -208,6 +208,7 @@ public:
   int resolve_json_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
   int create_unnest_table_item(TableItem *&table_item, ObString table_name);
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);
   int resolve_hybrid_search_item(const ParseNode &parse_tree, TableItem *&table_item);
@@ -847,6 +848,8 @@ protected:
 
 protected:
   ObStmtScope current_scope_;
+  uint64_t retry_ai_state_column_id_ = 0;
+  int build_ai_column_tasks_view(common::ObString &definition);
   int32_t current_level_;
   bool field_list_first_;
   ObDMLResolver *parent_namespace_resolver_;

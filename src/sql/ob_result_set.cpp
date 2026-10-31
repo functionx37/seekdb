@@ -27,6 +27,10 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/engine/table/ob_table_scan_op.h"
 #include "share/ob_ddl_checksum.h"
+#include "share/ai_service/ai_column_guard.h"
+#include "share/schema/ob_multi_version_schema_service.h"
+#include "query/session/ob_inner_sql_connection_access.h"
+#include "lib/utility/ob_smart_var.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -41,6 +45,83 @@ namespace sql
 {
 namespace
 {
+int append_ai_read_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if (name.ptr()[i] == '`') { ret = sql.append("`"); }
+    if (OB_SUCC(ret)) { ret = sql.append(name.ptr() + i, 1); }
+  }
+  if (OB_SUCC(ret)) { ret = sql.append("`"); }
+  return ret;
+}
+
+int check_ai_columns_in_session(ObIArray<uint64_t> &columns, ObSQLSessionInfo &session)
+{
+  int ret = OB_SUCCESS;
+  ObSchemaGetterGuard guard;
+  sqlclient::ObISQLConnectionGuard connection;
+  share::ColumnExecutionScope nested_scope;
+  share::ColumnTaskViewScope hidden_read_scope;
+  if (OB_ISNULL(GCTX.schema_service_)) { ret = OB_NOT_INIT; }
+  else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard))) {}
+  else { ret = query::ObInnerSQLConnectionAccess::create_connection_with_external_session(&session, connection); }
+  for (int64_t i = 0; OB_SUCC(ret) && i + 1 < columns.count(); i += 2) {
+    const ObTableSchema *table = nullptr;
+    const ObDatabaseSchema *database = nullptr;
+    const ObColumnSchemaV2 *column = nullptr;
+    ObSqlString sql;
+    if (OB_FAIL(guard.get_table_schema(columns.at(i), table))) {}
+    else if (OB_ISNULL(table) || OB_ISNULL(column = table->get_column_schema(columns.at(i + 1)))) {
+      ret = OB_SCHEMA_EAGAIN;
+    } else if (OB_FAIL(guard.get_database_schema(table->get_database_id(), database))) {}
+    else if (OB_ISNULL(database)) { ret = OB_SCHEMA_EAGAIN; }
+    else if (OB_FAIL(sql.append("SELECT 1 FROM "))) {}
+    else if (OB_FAIL(append_ai_read_identifier(sql, database->get_database_name_str()))) {}
+    else if (OB_FAIL(sql.append("."))) {}
+    else if (OB_FAIL(append_ai_read_identifier(sql, table->get_table_name_str()))) {}
+    else if (OB_FAIL(sql.append(" WHERE NOT ("))) {}
+    else if (OB_ISNULL(table->get_column_schema(column->get_ai_state_column_id()))) { ret = OB_SCHEMA_EAGAIN; }
+    else if (OB_FAIL(append_ai_read_identifier(sql,
+        table->get_column_schema(column->get_ai_state_column_id())->get_column_name_str()))) {}
+    else if (OB_FAIL(sql.append(" <=> 'READY') LIMIT 1"))) {}
+    else {
+      SMART_VAR(ObISQLClient::ReadResult, result) {
+        if (OB_ISNULL(connection.get_ptr())) { ret = OB_ERR_UNEXPECTED; }
+        else if (OB_FAIL(connection.get_ptr()->execute_read(sql.ptr(), result))) {}
+        else if (OB_ISNULL(result.get_result())) { ret = OB_ERR_UNEXPECTED; }
+        else if (OB_FAIL(result.get_result()->next())) {
+          if (ret == OB_ITER_END) { ret = OB_SUCCESS; }
+        } else {
+          ret = OB_AI_COLUMN_NOT_READY;
+          LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY, table->get_table_id(), column->get_column_id());
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int check_ai_strict_reads(ObPhysicalPlan &plan, ObSQLSessionInfo &session)
+{
+  int ret = OB_SUCCESS;
+  bool strict = false;
+  auto &columns = plan.get_ai_read_columns();
+  if (columns.empty() || share::ColumnExecutionScope::active()) { return ret; }
+  if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict)) || !strict) { return ret; }
+  // Nested SQL must preserve the outer statement's execution state and plan
+  // references, while retaining its transaction and uncommitted row visibility.
+  SMART_VAR(ObSQLSessionInfo::StmtSavedValue, saved) {
+    if (OB_FAIL(session.save_session(saved))) {}
+    else {
+      ret = check_ai_columns_in_session(columns, session);
+      const int restore_ret = session.restore_session(saved);
+      if (OB_SUCC(ret)) { ret = restore_ret; }
+    }
+  }
+  return ret;
+}
+
 int find_table_scan_table_id(const ObOpSpec *spec, uint64_t &table_id)
 {
   int ret = OB_SUCCESS;
@@ -134,6 +215,7 @@ OB_INLINE int ObResultSet::open_plan()
   if (OB_ISNULL(physical_plan_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("invalid physical plan", K(physical_plan_));
+  } else if (OB_FAIL(check_ai_strict_reads(*physical_plan_, my_session_))) {
   } else {
     has_top_limit_ = physical_plan_->has_top_limit();
     // PX admission is done in do_open_plan (right before execute_plan), not here.

@@ -59,6 +59,7 @@
 %destructor {oceanbase::common::ob_free($$);}<str_value_>
 
 %token <node> NAME_OB
+%token <non_reserved_keyword> READ_CSV READ_JSON READ_NDJSON READ_PARQUET FILE_GLOB
 %token <node> STRING_VALUE
 %token <node> NATIONAL_LITERAL
 %token <node> INTNUM
@@ -314,7 +315,7 @@ END_P SET_VAR DELIMITER
         MAX_FILE_SIZE MAX_TOKEN_SIZE MAX_NGRAM_SIZE LOG_DISK_SIZE MAX_QUERIES_PER_HOUR MAX_ROWS MAX_SIZE
         MAX_UPDATES_PER_HOUR MAX_USER_CONNECTIONS MEDIUM MEMORY MEMTABLE MESSAGE_TEXT META MICROSECOND
         MIN MIN_MAX MIN_NGRAM_SIZE MIN_TOKEN_SIZE MINOR MIN_ROWS MINUS MINUTE MISMATCH MODE
-        MODIFY MODULE MONTH MOVE MODEL MULTILINESTRING MULTIPOINT MULTIPOLYGON MULTIVALUE MUTEX
+        MODIFY MODULE MONTH MOVE MODEL MULTILINESTRING MULTIPOINT MULTIPOLYGON MULTIVALUE MUTEX RETRY
         MYSQL_ERRNO MAXIMIZE MEMBER MINVALUE MY_NAME
 
         NAME NAMES NAMESPACE NATIONAL NCHAR NDB NDBCLUSTER NESTED NEW NEXT NO NOAUDIT NONE NORMAL NOW NOWAIT NEVER NGRAM_TOKEN_SIZE
@@ -396,6 +397,7 @@ END_P SET_VAR DELIMITER
 %type <node> update_basic_stmt delete_basic_stmt
 %type <node> table_element_list table_element column_definition column_definition_ref column_definition_list column_name_list
 %type <node> opt_generated_keyname opt_generated_option_list opt_generated_column_attribute_list generated_column_attribute opt_storage_type
+%type <node> opt_ai_column_options ai_column_options ai_column_option opt_ai_retry_tail
 %type <node> data_type special_table_type opt_if_not_exists opt_if_exists opt_charset collation opt_collation cast_data_type
 %type <node> replace_with_opt_hint insert_with_opt_hint column_list opt_on_duplicate_key_clause opt_into opt_replace opt_temporary no_param_column_ref
 %type <node> insert_vals_list insert_vals value_or_values opt_insert_row_alias
@@ -498,6 +500,8 @@ END_P SET_VAR DELIMITER
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> file_table_expr file_table_alias file_reader_name
+%type <node> copy_stmt copy_source copy_options copy_option_list copy_option
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -556,6 +560,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -6118,6 +6123,27 @@ collation
 { $$ = NULL; }
 ;
 
+opt_ai_column_options:
+WITH '(' ai_column_options ')'
+{
+  merge_nodes($$, result, T_EXPR_LIST, $3);
+}
+| /*EMPTY*/
+{ $$ = NULL; }
+;
+
+ai_column_options:
+ai_column_option
+{ $$ = $1; }
+| ai_column_options ',' ai_column_option
+{ malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3); }
+;
+
+ai_column_option:
+column_name COMP_EQ expr_const
+{ malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3); }
+;
+
 opt_column_attribute_list:
 column_attribute_list
 {
@@ -6138,7 +6164,12 @@ column_attribute_list column_attribute
 }
 
 column_attribute:
-not NULLX
+AI COLUMN '(' expr ')' opt_ai_column_options
+{
+  dup_expr_string($4, result, @4.first_column, @4.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN, 2, $4, $6);
+}
+| not NULLX
 {
   (void)($1) ;
   (void)($2) ; /* make bison mute */
@@ -10834,6 +10865,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | '(' table_references ')'
 {
   $$ = $2;
@@ -12264,7 +12299,10 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt {
+  GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);
+  $$->children_[0] = $1;
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12305,8 +12343,8 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE { malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1; }
+| DESC { malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1; }
 ;
 
 explainable_stmt:
@@ -12636,6 +12674,14 @@ SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_conditi
   (void)$2;
   //(void)$3;
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_DATABASES, 2, $4, $3);
+}
+| SHOW AI COLUMNS from_or_in relation_factor opt_from_or_in_database_clause opt_show_condition
+{
+  (void)$4;
+  ParseNode *flags = NULL;
+  malloc_terminal_node(flags, result->malloc_pool_, T_INT);
+  flags->value_ = 4;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, flags, $5, $6, $7);
 }
 | SHOW opt_extended_or_full columns_or_fields from_or_in relation_factor opt_from_or_in_database_clause opt_show_condition
 {
@@ -14652,6 +14698,18 @@ relation_factor TO relation_factor
  *
  *****************************************************************************/
 alter_table_stmt:
+alter_with_opt_hint TABLE relation_factor RETRY AI COLUMN column_name opt_where opt_ai_retry_tail
+{
+  ParseNode *from_list = NULL;
+  ParseNode *table = NULL;
+  ParseNode *retry_column = NULL;
+  malloc_non_terminal_node(table, result->malloc_pool_, T_ORG, 4, $3, NULL, NULL, NULL);
+  malloc_non_terminal_node(from_list, result->malloc_pool_, T_TABLE_REFERENCES, 1, table);
+  malloc_non_terminal_node(retry_column, result->malloc_pool_, T_AI_COLUMN, 2, $7, $9);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_UPDATE, 11,
+      NULL, from_list, retry_column, $8, NULL, NULL, NULL, $1, NULL, NULL, NULL);
+}
+|
 alter_with_opt_hint TABLE relation_factor alter_table_actions
 {
   ParseNode *table_actions = NULL;
@@ -14661,6 +14719,11 @@ alter_with_opt_hint TABLE relation_factor alter_table_actions
 }
 ;
 
+
+opt_ai_retry_tail:
+/* EMPTY */ { $$ = NULL; }
+| ',' alter_table_action_list { $$ = $2; }
+;
 
 alter_table_actions:
 alter_table_action_list
@@ -16401,6 +16464,10 @@ NAME_OB
 {
   make_name_node($$, result->malloc_pool_, "model");
 }
+| RETRY
+{
+  make_name_node($$, result->malloc_pool_, "retry");
+}
 ;
 
 column_label:
@@ -16579,6 +16646,80 @@ DAY
 *
 *  JSON TABLE
 *============================================================*/
+
+copy_stmt:
+COPY copy_source TO STRING_VALUE copy_options
+{
+  $$ = $2;
+  if ($$->children_[PARSE_SELECT_INTO] != NULL || $$->children_[PARSE_SELECT_INTO_EXTRA] != NULL) {
+    yyerror(&@2, result, "COPY source cannot have an INTO clause");
+    YYERROR;
+  }
+  malloc_non_terminal_node($$->children_[PARSE_SELECT_INTO_EXTRA], result->malloc_pool_,
+      T_INTO_FILE_COPY, 2, $4, $5);
+  $$->children_[PARSE_SELECT_INTO_EXTRA]->is_tree_not_param_ = 1;
+}
+;
+
+copy_source:
+select_with_parens { $$ = $1; }
+| relation_factor
+{
+  ParseNode *star = NULL;
+  ParseNode *project = NULL;
+  ParseNode *table = NULL;
+  malloc_terminal_node(star, result->malloc_pool_, T_STAR);
+  malloc_non_terminal_node(project, result->malloc_pool_, T_PROJECT_STRING, 1, star);
+  dup_string_to_node(project, result->malloc_pool_, "*");
+  malloc_non_terminal_node(table, result->malloc_pool_, T_ORG, 4, $1, NULL, NULL, NULL);
+  malloc_select_node($$, result->malloc_pool_);
+  merge_nodes($$->children_[PARSE_SELECT_SELECT], result, T_PROJECT_LIST, project);
+  merge_nodes($$->children_[PARSE_SELECT_FROM], result, T_FROM_LIST, table);
+}
+;
+
+copy_options:
+/* empty */ { $$ = NULL; }
+| '(' copy_option_list ')' { merge_nodes($$, result, T_EXPR_LIST, $2); }
+;
+
+copy_option_list:
+copy_option { $$ = $1; }
+| copy_option_list ',' copy_option {
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_option:
+relation_name { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, NULL); }
+| relation_name STRING_VALUE { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $2); }
+| relation_name relation_name { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $2); }
+| relation_name BOOL_VALUE { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $2); }
+| relation_name COMP_EQ literal { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $3); }
+;
+
+file_table_expr:
+file_reader_name '(' expr_list ')' file_table_alias
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $5);
+  /* The file and options determine the result schema at resolution time. */
+  $$->is_tree_not_param_ = 1;
+}
+;
+
+file_table_alias:
+%prec LOWER_PARENS /* empty */ { $$ = NULL; }
+| relation_name { $$ = $1; }
+| AS relation_name { $$ = $2; }
+;
+
+file_reader_name:
+READ_CSV { make_name_node($$, result->malloc_pool_, "read_csv"); }
+| READ_JSON { make_name_node($$, result->malloc_pool_, "read_json"); }
+| READ_NDJSON { make_name_node($$, result->malloc_pool_, "read_ndjson"); }
+| READ_PARQUET { make_name_node($$, result->malloc_pool_, "read_parquet"); }
+| FILE_GLOB { make_name_node($$, result->malloc_pool_, "glob"); }
+;
 
 json_table_expr:
 JSON_TABLE '(' simple_expr ',' literal mock_jt_on_error_on_empty COLUMNS '(' jt_column_list ')' ')' relation_name
@@ -17448,6 +17589,7 @@ unreserved_keyword_normal { $$=$1;}
 
 unreserved_keyword_normal:
 ACCOUNT
+|       RETRY
 |       ACTION
 |       ACTIVE
 |       ADDDATE
@@ -17709,6 +17851,11 @@ ACCOUNT
 |       JSON_OBJECTAGG
 |       JSON_QUERY
 |       JSON_TABLE
+|       READ_CSV
+|       READ_JSON
+|       READ_NDJSON
+|       READ_PARQUET
+|       FILE_GLOB
 |       KEYWORD
 |       KEY_BLOCK_SIZE
 |       KEY_VERSION

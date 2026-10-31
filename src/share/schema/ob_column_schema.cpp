@@ -77,11 +77,19 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
     sub_type_ = src_schema.sub_type_;
     skip_index_attr_ = src_schema.skip_index_attr_;
     lob_chunk_size_ = src_schema.lob_chunk_size_;
+    ai_max_retries_ = src_schema.ai_max_retries_;
+    ai_definition_version_ = src_schema.ai_definition_version_;
+    ai_state_column_id_ = src_schema.ai_state_column_id_;
+    ai_request_column_id_ = src_schema.ai_request_column_id_;
+    ai_result_spec_column_id_ = src_schema.ai_result_spec_column_id_;
 
     if (OB_FAIL(deep_copy_obj(src_schema.orig_default_value_, orig_default_value_))) {
     } else if (OB_FAIL(deep_copy_obj(src_schema.cur_default_value_, cur_default_value_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.column_name_, column_name_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
+    } else if (OB_FAIL(set_ai_expression(src_schema.ai_expression_))) {
+    } else if (OB_FAIL(set_ai_normalized_expr(src_schema.ai_normalized_expr_))) {
+    } else if (OB_FAIL(set_ai_dependency_ids(src_schema.ai_dependency_ids_))) {
     } else if (OB_FAIL(set_extended_type_info(src_schema.extended_type_info_))) {
     } else if (src_schema.column_ref_idxs_ != NULL) {
       if (OB_FAIL(alloc_column_ref_set())) {
@@ -128,6 +136,7 @@ int64_t ObColumnSchemaV2::get_convert_size() const
     convert_size += extended_type_info_.at(i).length() + 1;
   }
   convert_size += local_session_vars_.get_deep_copy_size();
+  convert_size += ai_expression_.length() + ai_normalized_expr_.length() + ai_dependency_ids_.length() + 3;
   return convert_size;
 }
 
@@ -188,6 +197,14 @@ void ObColumnSchemaV2::reset()
   skip_index_attr_.reset();
   lob_chunk_size_ = OB_DEFAULT_LOB_CHUNK_SIZE;
   local_session_vars_.reset();
+  ai_expression_.reset();
+  ai_normalized_expr_.reset();
+  ai_dependency_ids_.reset();
+  ai_max_retries_ = 2;
+  ai_definition_version_ = 1;
+  ai_state_column_id_ = 0;
+  ai_request_column_id_ = 0;
+  ai_result_spec_column_id_ = 0;
   ObSchema::reset();
 }
 
@@ -235,7 +252,10 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 sub_type_,
                 skip_index_attr_,
                 lob_chunk_size_,
-                local_session_vars_);
+                local_session_vars_,
+                ai_expression_, ai_normalized_expr_, ai_dependency_ids_,
+                ai_max_retries_, ai_definition_version_, ai_state_column_id_,
+                ai_request_column_id_, ai_result_spec_column_id_);
   }
 
   return ret;
@@ -248,6 +268,9 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
   ObObj cur_default_value;
   ObString column_name;
   ObString comment;
+  ObString ai_expression;
+  ObString ai_normalized_expr;
+  ObString ai_dependency_ids;
   bool has_column_ref = false;
 
   LST_DO_CODE(OB_UNIS_DECODE,
@@ -295,7 +318,16 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 sub_type_,
                 skip_index_attr_,
                 lob_chunk_size_,
-                local_session_vars_);
+                local_session_vars_,
+                ai_expression, ai_normalized_expr, ai_dependency_ids,
+                ai_max_retries_, ai_definition_version_, ai_state_column_id_,
+                ai_request_column_id_, ai_result_spec_column_id_);
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(set_ai_expression(ai_expression))) {
+      } else if (OB_FAIL(set_ai_normalized_expr(ai_normalized_expr))) {
+      } else if (OB_FAIL(set_ai_dependency_ids(ai_dependency_ids))) {
+      }
+    }
   }
   return ret;
 }
@@ -340,7 +372,10 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               sub_type_,
               skip_index_attr_,
               lob_chunk_size_,
-              local_session_vars_);
+              local_session_vars_,
+              ai_expression_, ai_normalized_expr_, ai_dependency_ids_,
+              ai_max_retries_, ai_definition_version_, ai_state_column_id_,
+              ai_request_column_id_, ai_result_spec_column_id_);
   return len;
 }
 
@@ -567,6 +602,70 @@ int ObColumnSchemaV2::convert_column_id(const hash::ObHashMap<uint64_t, uint64_t
     } else {
       set_next_column_id(new_column_id);
     }
+  }
+  if (OB_SUCC(ret) && is_ai_column()) {
+    ObSEArray<uint64_t, 4> dependencies;
+    uint64_t state = 0;
+    uint64_t request = 0;
+    uint64_t result_spec = 0;
+    if (OB_FAIL(get_ai_dependencies(dependencies))) {
+    } else if (OB_FAIL(column_id_map.get_refactored(ai_state_column_id_, state))) {
+    } else if (OB_FAIL(column_id_map.get_refactored(ai_request_column_id_, request))) {
+    } else if (OB_FAIL(column_id_map.get_refactored(ai_result_spec_column_id_, result_spec))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < dependencies.count(); ++i) {
+        uint64_t mapped = 0;
+        if (OB_FAIL(column_id_map.get_refactored(dependencies.at(i), mapped))) {
+        } else {
+          dependencies.at(i) = mapped;
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(set_ai_dependencies(dependencies))) {
+      } else if (OB_SUCC(ret)) {
+        ai_state_column_id_ = state;
+        ai_request_column_id_ = request;
+        ai_result_spec_column_id_ = result_spec;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObColumnSchemaV2::get_ai_dependencies(ObIArray<uint64_t> &ids) const
+{
+  int ret = OB_SUCCESS;
+  ids.reuse();
+  uint64_t id = 0;
+  bool has_digit = false;
+  for (int64_t i = 0; OB_SUCC(ret) && i <= ai_dependency_ids_.length(); ++i) {
+    const char c = i == ai_dependency_ids_.length() ? ',' : ai_dependency_ids_.ptr()[i];
+    if (c == ',') {
+      if (has_digit) {
+        ret = ids.push_back(id);
+      } else if (!ai_dependency_ids_.empty()) {
+        ret = OB_INVALID_ARGUMENT;
+      }
+      id = 0;
+      has_digit = false;
+    } else if (c < '0' || c > '9' || id > (UINT64_MAX - (c - '0')) / 10) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      id = id * 10 + c - '0';
+      has_digit = true;
+    }
+  }
+  return ret;
+}
+
+int ObColumnSchemaV2::set_ai_dependencies(const ObIArray<uint64_t> &ids)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString text;
+  for (int64_t i = 0; OB_SUCC(ret) && i < ids.count(); ++i) {
+    ret = text.append_fmt("%s%lu", i == 0 ? "" : ",", ids.at(i));
+  }
+  if (OB_SUCC(ret)) {
+    ret = set_ai_dependency_ids(text.string());
   }
   return ret;
 }

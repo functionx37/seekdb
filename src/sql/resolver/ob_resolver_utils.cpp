@@ -227,7 +227,7 @@ int ObResolverUtils::check_json_table_column_exists(const TableItem &table_item,
 
   for (size_t i = 0; OB_SUCC(ret) && i < jt_def->all_cols_.count(); ++i) {
     ObJtColBaseInfo* col_info = jt_def->all_cols_.at(i);
-    if (col_info->col_type_ != NESTED_COL_TYPE) {
+    if (col_info->col_type_ != NESTED_COL_TYPE && col_info->col_type_ != COL_TYPE_FILE_ROOT) {
       ObString& cur_column_name = col_info->col_name_;
       if (ObCharset::case_insensitive_equal(cur_column_name, column_name)) {
         exists = true;

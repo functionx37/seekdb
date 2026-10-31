@@ -1056,6 +1056,27 @@ int ObSchemaRetrieveUtils::fill_column_schema(const bool check_deleted, T &resul
       } else {}
     }
 
+    if (OB_SUCC(ret) && column.is_ai_column()) {
+      ObString expression;
+      ObString normalized;
+      ObString dependencies;
+      EXTRACT_VARCHAR_FIELD_MYSQL(result, "ai_expression", expression);
+      EXTRACT_VARCHAR_FIELD_MYSQL(result, "ai_normalized_expr", normalized);
+      EXTRACT_VARCHAR_FIELD_MYSQL_WITH_DEFAULT_VALUE(result, "ai_dependency_ids", dependencies,
+                                                    true, false, ObString(""));
+      EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, ai_max_retries, column, int64_t);
+      EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, ai_definition_version, column, int64_t);
+      EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, ai_state_column_id, column, uint64_t);
+      EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, ai_request_column_id, column, uint64_t);
+      EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, ai_result_spec_column_id, column, uint64_t);
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(column.set_ai_expression(expression))) {
+        } else if (OB_FAIL(column.set_ai_normalized_expr(normalized))) {
+        } else if (OB_FAIL(column.set_ai_dependency_ids(dependencies))) {
+        }
+      }
+    }
+
     if (OB_SUCC(ret) && column.is_generated_column()) {
       bool skip_null_error = true;
       bool skip_column_error = true;

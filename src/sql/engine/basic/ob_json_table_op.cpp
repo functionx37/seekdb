@@ -326,7 +326,7 @@ OB_DEF_SERIALIZE(ObJsonTableSpec)
     OB_UNIS_ENCODE(info);
   }
   if (OB_FAIL(ret)) {
-  } else if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE) {
+  } else if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE || table_type_ == OB_FILE_TABLE_TYPE) {
     OB_UNIS_ENCODE(table_type_);
     int32_t value_exprs_count = value_exprs_.count() - 1;
     OB_UNIS_ENCODE(value_exprs_count);
@@ -354,7 +354,7 @@ OB_DEF_SERIALIZE_SIZE(ObJsonTableSpec)
     const ObJtColInfo& info = *cols_def_.at(i);
     OB_UNIS_ADD_LEN(info);
   }
-  if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE) {
+  if (table_type_ == MulModeTableType::OB_UNNEST_TABLE_TYPE || table_type_ == OB_FILE_TABLE_TYPE) {
     OB_UNIS_ADD_LEN(table_type_);
     int32_t value_exprs_count = value_exprs_.count() - 1;
     OB_UNIS_ADD_LEN(value_exprs_count);
@@ -395,12 +395,14 @@ OB_DEF_DESERIALIZE(ObJsonTableSpec)
       if (OB_FAIL(cols_def_.push_back(col_info))) {
       } else if (col_info->col_type_ == COL_TYPE_UNNEST) {
         table_type_flag = OB_UNNEST_TABLE;
+      } else if (col_info->col_type_ == COL_TYPE_FILE_ROOT) {
+        table_type_flag = OB_FILE_TABLE_TYPE;
       }
     }
   }
 
   if (OB_FAIL(ret)) {
-  } else if (table_type_flag == OB_UNNEST_TABLE) {
+  } else if (table_type_flag == OB_UNNEST_TABLE || table_type_flag == OB_FILE_TABLE_TYPE) {
     OB_UNIS_DECODE(table_type_);
     int32_t value_exprs_count = 0;
     OB_UNIS_DECODE(value_exprs_count);
@@ -584,7 +586,9 @@ int ObJsonTableOp::generate_column_trees(JtColTreeNode*& root)
 int ObJsonTableOp::inner_open()
 {
   INIT_SUCC(ret);
-  if (OB_FAIL(init())) {
+  if (MY_SPEC.table_type_ == OB_FILE_TABLE_TYPE) {
+    ret = open_file_scan();
+  } else if (OB_FAIL(init())) {
   } else if (MY_SPEC.value_exprs_.empty()) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(root_->open(&jt_ctx_))) {
@@ -599,6 +603,20 @@ int ObJsonTableOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (MY_SPEC.table_type_ == OB_FILE_TABLE_TYPE) {
+    try {
+      if (OB_ISNULL(file_scan_)) {
+        ret = OB_NOT_INIT;
+      } else {
+        file_scan_->rewind();
+        file_batch_ = file::Batch{};
+        file_row_ = 0;
+      }
+    } catch (const rust::Error &error) {
+      ret = OB_INVALID_DATA;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, error.what());
+    }
+    return ret;
   } else {
     jt_ctx_.row_alloc_.reuse();
   }
@@ -685,6 +703,7 @@ int ObJsonTableOp::init()
 int ObJsonTableOp::inner_close()
 {
   INIT_SUCC(ret);
+  close_file_scan();
   if (OB_NOT_NULL(root_)) {
     if (OB_FAIL(root_->reset(&jt_ctx_))) {
     }
@@ -722,7 +741,131 @@ void ScanNode::reset_reg_columns(JtScanCtx* ctx)
 
 void ObJsonTableOp::destroy()
 {
+  close_file_scan();
   ObOperator::destroy();
+}
+
+int ObJsonTableOp::open_file_scan()
+{
+  int ret = OB_SUCCESS;
+  const ObSQLSessionInfo *session = ctx_.get_my_session();
+  bool enabled = false;
+  ObString secure_root;
+  ObDatum *plan = nullptr;
+  close_file_scan();
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+  } else if (!enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL is disabled");
+  } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_SECURE_FILE_PRIV, secure_root))) {
+  } else if (MY_SPEC.value_exprs_.count() != 1 || OB_ISNULL(MY_SPEC.value_exprs_.at(0))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(MY_SPEC.value_exprs_.at(0)->eval(eval_ctx_, plan))) {
+  } else if (OB_ISNULL(plan) || plan->is_null()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    rust::Vec<size_t> projection;
+    for (int64_t i = 1; OB_SUCC(ret) && i < MY_SPEC.cols_def_.count(); ++i) {
+      const ObJtColInfo *column = MY_SPEC.cols_def_.at(i);
+      if (OB_ISNULL(column)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (column->output_column_idx_ >= 0) {
+        projection.push_back(static_cast<size_t>(i - 1));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      try {
+        ObString serialized = plan->get_string();
+        auto scan = file::open_scan(rust::Str(serialized.ptr(), serialized.length()),
+            rust::Str(secure_root.empty() ? "" : secure_root.ptr(), secure_root.length()),
+            rust::Slice<const size_t>(projection.data(), projection.size()));
+        file_scan_ = scan.into_raw();
+      } catch (const rust::Error &error) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, error.what());
+      }
+    }
+  }
+  return ret;
+}
+
+int ObJsonTableOp::next_file_row()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  if (OB_ISNULL(file_scan_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(ctx_.check_status())) {
+  } else {
+    try {
+      if (file_row_ >= file_batch_.rows) {
+        file_batch_ = file_scan_->next_batch(64);
+        file_row_ = 0;
+      }
+      const auto &batch = file_batch_;
+      if (batch.rows == 0) {
+        ret = OB_ITER_END;
+      } else {
+        size_t position = file_row_ * (batch.cells.size() / batch.rows);
+        for (int64_t i = 1; OB_SUCC(ret) && i < MY_SPEC.cols_def_.count(); ++i) {
+          const ObJtColInfo *column = MY_SPEC.cols_def_.at(i);
+          if (OB_ISNULL(column)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (column->output_column_idx_ >= 0) {
+            if (position >= batch.cells.size()
+                || column->output_column_idx_ >= MY_SPEC.column_exprs_.count()) {
+              ret = OB_INVALID_DATA;
+            } else {
+              const auto &cell = batch.cells[position++];
+              ObExpr *expr = MY_SPEC.column_exprs_.at(column->output_column_idx_);
+              ObDatum &result = expr->locate_datum_for_write(eval_ctx_);
+              if (cell.is_null) {
+                result.set_null();
+              } else {
+                switch (expr->datum_meta_.type_) {
+                  case ObIntType:
+                  case ObTinyIntType: result.set_int(cell.integer); break;
+                  case ObDoubleType: result.set_double(cell.number); break;
+                  case ObDateType: result.set_date(static_cast<int32_t>(cell.integer)); break;
+                  case ObDateTimeType: result.set_datetime(cell.integer); break;
+                  case ObVarcharType: {
+                    ObTextStringDatumResult text(expr->datum_meta_.type_, expr, &eval_ctx_, &result);
+                    if (OB_FAIL(text.init(cell.text.size()))) {
+                    } else if (OB_FAIL(text.append(ObString(cell.text.size(), cell.text.data())))) {
+                    } else {
+                      text.set_result();
+                    }
+                    break;
+                  }
+                  default: ret = OB_ERR_UNEXPECTED; break;
+                }
+              }
+              if (OB_SUCC(ret)) {
+                expr->set_evaluated_projected(eval_ctx_);
+              }
+            }
+          }
+        }
+        ++file_row_;
+      }
+    } catch (const rust::Error &error) {
+      ret = OB_INVALID_DATA;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, error.what());
+    }
+  }
+  return ret;
+}
+
+void ObJsonTableOp::close_file_scan()
+{
+  file_batch_ = file::Batch{};
+  file_row_ = 0;
+  if (OB_NOT_NULL(file_scan_)) {
+    auto owner = rust::Box<file::Scan>::from_raw(file_scan_);
+    file_scan_ = nullptr;
+  }
 }
 
 int RegularCol::check_item_method_json(ObRegCol &col_node, JtScanCtx* ctx)
@@ -1402,7 +1545,9 @@ int ObJsonTableOp::inner_get_next_row()
 {
   INIT_SUCC(ret);
   bool is_root_null = false;
-  if (!(jt_ctx_.is_json_table_func()
+  if (MY_SPEC.table_type_ == OB_FILE_TABLE_TYPE) {
+    ret = next_file_row();
+  } else if (!(jt_ctx_.is_json_table_func()
         || jt_ctx_.is_unnest_table_func())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (is_evaled_) {

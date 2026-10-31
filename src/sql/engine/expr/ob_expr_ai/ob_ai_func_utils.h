@@ -329,6 +329,10 @@ public:
                                  ObJsonObject *http_response,
                                  ObIJsonBase *&result);
   static int set_string_result(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res, ObString &res_str);
+  static int validate_embeddings(ObIAllocator &allocator, ObIJsonBase *result,
+                                 int64_t count, int64_t dimension);
+  static int normalize_rerank(ObIAllocator &allocator, ObIJsonBase *result,
+                             int64_t count, ObJsonArray *&output);
   static bool is_provider_support_base64(const ObString &provider);
   static int decode_base64_embedding_array(const ObIJsonBase &embedding_jbase, ObIAllocator &allocator,
                                            const int64_t dimension, float *&vector);

@@ -335,6 +335,7 @@ public:
   inline const ObExprFrameInfo &get_expr_frame_info() const { return expr_frame_info_; }
 
   const ObOpSpec *get_root_op_spec() const { return root_op_spec_; }
+  common::ObFixedArray<uint64_t, common::ObIAllocator> &get_ai_read_columns() { return ai_read_columns_; }
   void set_root_op_spec(ObOpSpec *spec) { root_op_spec_ = spec; is_new_engine_ = true; }
   inline bool need_consistent_snapshot() const { return need_consistent_snapshot_; }
   inline void set_need_consistent_snapshot(bool need_snapshot)
@@ -387,6 +388,7 @@ private:
   ObPhyPlanHint phy_hint_; //hints for this plan
   // root operator spec for static typing engine.
   ObOpSpec *root_op_spec_;
+  common::ObFixedArray<uint64_t, common::ObIAllocator> ai_read_columns_;
   int64_t param_count_;
   uint64_t signature_;
   // Runtime read-only data structure

@@ -732,6 +732,9 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
     }
     if (OB_SUCC(ret) && OB_FAIL(check_alter_column_schemas_valid(*alter_table_stmt))) {
     }
+    if (OB_SUCC(ret)) {
+      ret = resolve_ai_column_additions();
+    }
 
     if (OB_SUCC(ret)) {
       ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();

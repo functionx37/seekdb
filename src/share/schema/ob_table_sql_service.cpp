@@ -21,6 +21,9 @@
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
 #include "share/schema/ob_partition_sql_helper.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "share/schema/ob_multi_version_schema_service.h"
+#include "common/mysqlclient/ob_mysql_transaction.h"
 #include "share/ob_timezone_mgr.h"
 
 namespace oceanbase
@@ -3221,6 +3224,14 @@ int ObTableSqlService::gen_column_dml_without_check(
                          || (OB_FAIL(dml.add_column("skip_index_attr", column.get_skip_index_attr().get_packed_value())))
                          || (OB_FAIL(dml.add_column("lob_chunk_size", column.get_lob_chunk_size())))
                          || (OB_FAIL(dml.add_column("local_session_vars", ObHexEscapeSqlStr(local_session_var))))
+                         || OB_FAIL(dml.add_column("ai_expression", ObHexEscapeSqlStr(column.get_ai_expression())))
+                         || OB_FAIL(dml.add_column("ai_normalized_expr", ObHexEscapeSqlStr(column.get_ai_normalized_expr())))
+                         || OB_FAIL(dml.add_column("ai_dependency_ids", ObHexEscapeSqlStr(column.get_ai_dependency_ids())))
+                         || OB_FAIL(dml.add_column("ai_max_retries", column.get_ai_max_retries()))
+                         || OB_FAIL(dml.add_column("ai_definition_version", column.get_ai_definition_version()))
+                         || OB_FAIL(dml.add_column("ai_state_column_id", column.get_ai_state_column_id()))
+                         || OB_FAIL(dml.add_column("ai_request_column_id", column.get_ai_request_column_id()))
+                         || OB_FAIL(dml.add_column("ai_result_spec_column_id", column.get_ai_result_spec_column_id()))
                          || OB_FAIL(dml.add_gmt_create())
                          || OB_FAIL(dml.add_gmt_modified()))) {
     }

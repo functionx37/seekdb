@@ -125,6 +125,7 @@ enum JtColType {
   NESTED_COL_TYPE, // 5
   COL_TYPE_QUERY_JSON_COL, // 6
   COL_TYPE_UNNEST, // 7
+  COL_TYPE_FILE_ROOT, // 8
 };
 
 enum ObNameTypeClass

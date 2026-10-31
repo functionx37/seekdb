@@ -36,6 +36,7 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
   : ObPlanCacheObject(ObLibCacheNameSpace::NS_CRSR, mem_context),
     phy_hint_(),
     root_op_spec_(NULL),
+    ai_read_columns_(allocator_),
     param_count_(0),
     signature_(0),
     field_columns_(mem_context->get_arena_allocator()),
@@ -129,6 +130,7 @@ void ObPhysicalPlan::reset()
   signature_ = 0;
   field_columns_.reset();
   param_columns_.reset();
+  ai_read_columns_.reset();
   autoinc_params_.reset();
   stmt_need_privs_.reset();
   vars_.reset();
@@ -649,7 +651,8 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     need_switch_to_table_lock_worker_,
                     data_complement_gen_doc_id_,
                     px_parallel_rule_,
-                    px_worker_share_plan_enabled_);
+                    px_worker_share_plan_enabled_,
+                    ai_read_columns_);
 
 int ObPhysicalPlan::set_table_access_plans(const ObTablePartitionInfoArray &infos,
                                         ObSchemaGetterGuard &schema_guard)

@@ -324,11 +324,13 @@ int ObSelectResolver::do_resolve_set_query_in_normal(const ParseNode &parse_tree
   int ret = OB_SUCCESS;
   ObSelectStmt *select_stmt = get_select_stmt();
   ParseNode *select_set = parse_tree.children_[PARSE_SELECT_SET];
+  const ParseNode *into_node = ObResolverUtils::get_select_into_node(parse_tree);
+  const bool is_copy = OB_NOT_NULL(into_node) && into_node->type_ == T_INTO_FILE_COPY;
   bool force_serial_set_order = false;
   if (OB_ISNULL(select_set) || OB_ISNULL(select_stmt) || OB_ISNULL(session_info_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(set_stmt_set_type(select_stmt, select_set))) {
-  } else if (OB_FAIL(resolve_into_clause(ObResolverUtils::get_select_into_node(parse_tree)))) {
+  } else if (!is_copy && OB_FAIL(resolve_into_clause(into_node))) {
   } else if (OB_FAIL(resolve_with_clause(parse_tree.children_[PARSE_SELECT_WITH]))) {
   } else {
     const int64_t num_child = select_set->num_child_;
@@ -381,6 +383,7 @@ int ObSelectResolver::do_resolve_set_query_in_normal(const ParseNode &parse_tree
   }
 
   if (OB_FAIL(ret)) {
+  } else if (is_copy && OB_FAIL(resolve_into_clause(into_node))) {
   } else if (OB_FAIL(resolve_order_clause(parse_tree.children_[PARSE_SELECT_ORDER], force_serial_set_order))) {
   } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[PARSE_SELECT_LIMIT]))) {
   } else if (OB_FAIL(resolve_fetch_clause(parse_tree.children_[PARSE_SELECT_FETCH]))) {
@@ -3098,7 +3101,9 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
     } else {
       new(into_item) ObSelectIntoItem();
       into_item->into_type_ = node->type_;
-      if (T_INTO_OUTFILE == node->type_) { // into outfile
+        if (T_INTO_FILE_COPY == node->type_) {
+          ret = resolve_copy_options(*node, *into_item);
+        } else if (T_INTO_OUTFILE == node->type_) { // into outfile
         if (is_in_set_query()) {
           ret = OB_INAPPROPRIATE_INTO;
         } else if (node->num_child_ == 3 && NULL != node->children_[1]
@@ -4421,6 +4426,8 @@ int ObSelectResolver::try_resolve_values_table_from_union(const ParseNode &parse
                                                           bool &resolve_happened)
 {
   int ret = OB_SUCCESS;
+  const ParseNode *into_node = ObResolverUtils::get_select_into_node(parse_node);
+  const bool is_copy = into_node != nullptr && into_node->type_ == T_INTO_FILE_COPY;
   bool is_valid = true;
   ObSEArray<int64_t, 16> leaf_nodes;
   ObValuesTableDef *table_def = NULL;
@@ -4435,12 +4442,13 @@ int ObSelectResolver::try_resolve_values_table_from_union(const ParseNode &parse
   } else if (!is_valid) {
     /* do nothing */
   } else {
-    if (OB_FAIL(resolve_into_clause(ObResolverUtils::get_select_into_node(parse_node)))) {
+    if (!is_copy && OB_FAIL(resolve_into_clause(into_node))) {
     } else if (OB_FAIL(resolve_with_clause(parse_node.children_[PARSE_SELECT_WITH]))) {
     } else if (OB_FAIL(resolve_values_table_from_union(leaf_nodes, table_def))) {
     } else if (OB_FAIL(ObResolverUtils::create_values_table_query(session_info_, allocator_,
                                                           params_.expr_factory_, params_.query_ctx_,
                                                           select_stmt, table_def))) {
+    } else if (is_copy && OB_FAIL(resolve_into_clause(into_node))) {
     } else if (OB_FAIL(resolve_order_clause(parse_node.children_[PARSE_SELECT_ORDER]))) {
     } else if (OB_FAIL(resolve_limit_clause(parse_node.children_[PARSE_SELECT_LIMIT]))) {
     } else if (OB_FAIL(resolve_fetch_clause(parse_node.children_[PARSE_SELECT_FETCH]))) {

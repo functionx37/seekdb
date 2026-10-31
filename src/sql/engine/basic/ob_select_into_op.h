@@ -23,6 +23,7 @@
 #include "sql/engine/basic/ob_select_into_basic.h"
 #include "sql/engine/basic/ob_external_file_writer.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
+#include "rust/file_scan.h"
 
 namespace oceanbase
 {
@@ -126,7 +127,9 @@ public:
       external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
-      need_commit_(true)
+      need_commit_(true),
+      copy_export_(nullptr),
+      copy_completed_(false)
   {
   }
 
@@ -196,6 +199,10 @@ public:
 
 private:
   int init_env_common();
+  int open_file_copy();
+  int consume_file_copy(bool batch, int64_t max_rows);
+  int write_file_copy_row();
+  void close_file_copy();
   int init_csv_env();
   void set_csv_format_options();
 
@@ -292,6 +299,8 @@ private:
   ObExternalFileFormat::FormatType format_type_;
   uint32_t block_id_;
   bool need_commit_;
+  file::Export *copy_export_;
+  bool copy_completed_;
   static const int64_t SHARED_BUFFER_SIZE = 2LL * 1024 * 1024;
 
 };

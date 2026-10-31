@@ -1966,6 +1966,13 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
       }
     }
   }
+  if (OB_SUCC(ret) && column.is_ai_column()
+      && (column.is_generated_column() || column.is_autoincrement()
+          || !column.is_nullable() || resolve_stat.is_set_default_value_ || resolve_stat.is_unique_key_
+          || resolve_stat.is_primary_key_)) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN must be nullable and cannot have a default, primary key or unique constraint");
+  }
   return ret;
 }
 
@@ -2084,6 +2091,9 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
     for (int64_t i = 0; OB_SUCC(ret) && i < attrs_node->num_child_; ++i) {
       ParseNode *attr_node = attrs_node->children_[i];
       switch (attr_node->type_) {
+      case T_AI_COLUMN:
+        ret = resolve_ai_column_attribute(column, *attr_node);
+        break;
       case T_CONSTR_NOT_NULL: {
         if (OB_FAIL(resolve_normal_column_attribute_constr_not_null(column, attr_node, resolve_stat))) {
         }

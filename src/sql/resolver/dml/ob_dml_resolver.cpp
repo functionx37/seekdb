@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "rust/config.h"
 #include "ob_dml_resolver.h"
+#include "share/ai_service/ai_column_guard.h"
+#include <optional>
 #include "sql/resolver/dml/ob_view_table_resolver.h"
 #include "sql/optimizer/ob_optimizer_util.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
@@ -1836,6 +1838,17 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
   ObColumnRefRawExpr *col_expr = NULL;
   ObSchemaGetterGuard *schema_guard = NULL;
   ColumnItem column_item;
+  if (share::ColumnTaskViewScope::active()
+      || (session_info_ != nullptr && !session_info_->is_user_session() && share::ColumnExecutionScope::active())) {
+    include_hidden = true;
+  } else if (retry_ai_state_column_id_ != 0) {
+    const ObTableSchema *retry_table = nullptr;
+    if (schema_checker_->get_table_schema(table_item.ref_id_, retry_table) == OB_SUCCESS
+        && retry_table != nullptr) {
+      const auto *state = retry_table->get_column_schema(retry_ai_state_column_id_);
+      include_hidden = include_hidden || (state != nullptr && state->get_column_name_str() == column_name);
+    }
+  }
   if (NULL == stmt) {
     stmt = get_stmt();
   }
@@ -2703,6 +2716,10 @@ int ObDMLResolver::resolve_table(const ParseNode &parse_tree,
       }
       case T_JSON_TABLE_EXPRESSION: {
         OZ (resolve_json_table_item(*table_node, table_item));
+        break;
+      }
+      case T_FILE_TABLE_EXPRESSION: {
+        OZ (resolve_file_table_item(*table_node, table_item));
         break;
       }
       case T_UNNEST_EXPRESSION: {
@@ -4249,7 +4266,15 @@ int ObDMLResolver::do_expand_view(TableItem &view_item, ObChildStmtResolver &vie
 
       ObParser parser(*params_.allocator_, session_info_->get_sql_mode(),
                       session_info_->get_charsets4parser());
-      if (OB_FAIL(ObSQLUtils::generate_view_definition_for_resolve(
+      const bool live_tasks = is_sys_view(view_item.ref_id_)
+          && view_schema->get_table_name_str() == "__all_ai_column_task";
+      std::optional<share::ColumnTaskViewScope> task_scope;
+      if (live_tasks) { task_scope.emplace(); }
+      if (live_tasks && !stmt->is_select_stmt()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "modifying the AI COLUMN task view");
+      } else if (live_tasks ? OB_FAIL(build_ai_column_tasks_view(view_def))
+          : OB_FAIL(ObSQLUtils::generate_view_definition_for_resolve(
                               *params_.allocator_,
                               session_info_->get_local_collation_connection(),
                               view_schema->get_view_schema(),
@@ -5678,6 +5703,10 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
   const ColumnItem *view_column_item = NULL;
   if (OB_ISNULL(col_expr) || OB_ISNULL(dml_stmt)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if ((col_expr->get_column_flags() & AI_COLUMN_FLAG)
+      && (session_info_->is_user_session() || !share::ColumnExecutionScope::active())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "assigning an AI COLUMN result");
   } else if (col_expr->is_generated_column()) {
     is_generated = true;
   } else if (OB_ISNULL(table_item = dml_stmt->get_table_item_by_id(col_expr->get_table_id()))) {
@@ -5704,6 +5733,10 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_ISNULL(basic_column_item->expr_)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if ((basic_column_item->expr_->get_column_flags() & AI_COLUMN_FLAG)
+        && (session_info_->is_user_session() || !share::ColumnExecutionScope::active())) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "assigning an AI COLUMN result");
     } else if (basic_column_item->expr_->is_generated_column()) {
       is_generated = true;
     }
@@ -7456,7 +7489,7 @@ int ObDMLResolver::resolve_json_table_column_all_items(const TableItem &table_it
       ObJtColBaseInfo* col_info = jt_def->all_cols_.at(i);
       if (OB_ISNULL(col_info)) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (col_info->col_type_ != NESTED_COL_TYPE) {
+      } else if (col_info->col_type_ != NESTED_COL_TYPE && col_info->col_type_ != COL_TYPE_FILE_ROOT) {
         ColumnItem* col_item = stmt->get_column_item_by_id(table_item.table_id_, col_info->output_column_idx_);
         CK (OB_NOT_NULL(col_item));
         if (OB_SUCC(ret) && OB_FAIL(col_items.push_back(*col_item))) {
@@ -11316,6 +11349,10 @@ int ObDMLResolver::resolve_values_table_for_insert(const ParseNode &table_node,
             } else if (OB_FAIL(resolve_sql_expr(*value_node, expr))) {
             } else if (OB_ISNULL(expr) || OB_ISNULL(table_info.values_desc_.at(j))) {
               ret = OB_ERR_UNEXPECTED;
+            } else if ((table_info.values_desc_.at(j)->get_column_flags() & AI_COLUMN_FLAG)
+                       && expr->get_expr_type() != T_DEFAULT) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "assigning an AI COLUMN result");
             } else if (table_info.values_desc_.at(j)->is_generated_column() &&
                        expr->get_expr_type() != T_DEFAULT) {
               ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;

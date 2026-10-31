@@ -1350,6 +1350,7 @@ SQL_UNITY_GROUPS = [
             "src/sql/resolver/ddl/ob_create_table_stmt.cpp",
             "src/sql/resolver/ddl/ob_create_view_resolver.cpp",
             "src/sql/resolver/ddl/ob_ddl_resolver.cpp",
+            "src/sql/resolver/ddl/ob_ai_column_resolver.cpp",
             "src/sql/resolver/ddl/ob_ddl_stmt.cpp",
             "src/sql/resolver/ddl/ob_drop_database_resolver.cpp",
             "src/sql/resolver/ddl/ob_drop_index_resolver.cpp",
@@ -1593,6 +1594,8 @@ SQL_SIMD_UNITY_GROUPS = [
 ]
 
 SQL_STANDALONE_SOURCES = [
+    "src/sql/resolver/dml/ob_file_table_resolver.cpp",
+    "src/sql/resolver/dml/ob_ai_column_tasks_resolver.cpp",
     "src/sql/engine/aggregate/ob_aggregate_processor.cpp",
     "src/sql/engine/expr/ob_expr_add.cpp",
     "src/sql/engine/expr/ob_expr_array_sort.cpp",

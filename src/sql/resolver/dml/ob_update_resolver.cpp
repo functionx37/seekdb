@@ -81,7 +81,15 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     current_scope_ = T_UPDATE_SCOPE;
     // resolve assignments
     ParseNode *assign_list = parse_tree.children_[UPDATE_LIST];
-    if (OB_ISNULL(assign_list) || OB_UNLIKELY(T_ASSIGN_LIST != assign_list->type_)) {
+    if (OB_NOT_NULL(assign_list) && assign_list->type_ == T_AI_COLUMN
+        && assign_list->num_child_ == 2 && OB_NOT_NULL(assign_list->children_[0])) {
+      if (assign_list->children_[1] != nullptr) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+      } else {
+        ret = resolve_ai_retry(*assign_list->children_[0], parse_tree.children_[WHERE], tables_assign);
+      }
+    } else if (OB_ISNULL(assign_list) || OB_UNLIKELY(T_ASSIGN_LIST != assign_list->type_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid assign list node", K(assign_list));
     } else if (OB_FAIL(resolve_assignments(*assign_list,
@@ -149,6 +157,62 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     } else if (OB_FAIL(update_stmt->check_dml_source_from_join())) {
     } else if (OB_FAIL(check_safe_update_mode(update_stmt))) {
     } else { /*do nothing*/ }
+  }
+  return ret;
+}
+
+namespace
+{
+int rewrite_retry_status(ParseNode *node, const ObString &state_name, int64_t depth = 0)
+{
+  int ret = OB_SUCCESS;
+  if (node == nullptr) { return ret; }
+  if (depth >= 256) { return OB_SIZE_OVERFLOW; }
+  if (node->type_ == T_COLUMN_REF && node->num_child_ == 3
+      && node->children_[0] == nullptr && node->children_[1] == nullptr
+      && node->children_[2] != nullptr) {
+    ParseNode *name = node->children_[2];
+    if (!name->is_input_quoted_ && ObString(name->str_len_, name->str_value_).case_compare("status") == 0) {
+      name->str_value_ = state_name.ptr();
+      name->str_len_ = state_name.length();
+      return ret;
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+    ret = rewrite_retry_status(node->children_[i], state_name, depth + 1);
+  }
+  return ret;
+}
+}
+
+int ObUpdateResolver::resolve_ai_retry(const ParseNode &name, ParseNode *condition,
+    ObIArray<ObTableAssignment> &assignments)
+{
+  int ret = OB_SUCCESS;
+  ObUpdateStmt *stmt = get_update_stmt();
+  const TableItem *table = stmt->get_table_item(0);
+  const ObTableSchema *schema = nullptr;
+  const ObColumnSchemaV2 *column = nullptr;
+  if (OB_ISNULL(table) || !table->is_basic_table()) {
+    ret = OB_NOT_SUPPORTED;
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table->ref_id_, schema))) {
+  } else if (OB_ISNULL(schema)
+      || OB_ISNULL(column = schema->get_column_schema(ObString(name.str_len_, name.str_value_)))
+      || !column->is_ai_column()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+  } else {
+    const auto *state = schema->get_column_schema(column->get_ai_state_column_id());
+    if (OB_ISNULL(state)) { ret = OB_ERR_UNEXPECTED; }
+    else {
+      retry_ai_state_column_id_ = state->get_column_id();
+      ret = rewrite_retry_status(condition, state->get_column_name_str());
+    }
+    ObTableAssignment assignment;
+    assignment.table_id_ = table->table_id_;
+    if (OB_FAIL(ret)) {}
+    else if (OB_FAIL(assignments.push_back(assignment))) {}
+    else { ret = invalidate_ai_columns(assignments, 0, *table, *schema, column->get_column_id()); }
   }
   return ret;
 }

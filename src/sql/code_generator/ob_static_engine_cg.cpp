@@ -5572,6 +5572,13 @@ int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
 
     if (OB_FAIL(spec.dup_origin_column_defs(op.get_origin_cols_def()))) {
     }
+    if (OB_SUCC(ret) && spec.table_type_ == OB_FILE_TABLE_TYPE) {
+      // Resolver column IDs are not runtime datum slots. Leave unreferenced
+      // file fields unprojected, then assign slots only for referenced fields.
+      for (int64_t i = 0; i < spec.cols_def_.count(); ++i) {
+        spec.cols_def_.at(i)->output_column_idx_ = -1;
+      }
+    }
 
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {

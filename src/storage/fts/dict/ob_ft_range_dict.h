@@ -34,6 +34,7 @@ namespace storage
 {
 class ObFTRangeDict final : public ObIFTDict
 {
+  friend class RangeDictTestAccess;
 public:
   ObFTRangeDict(ObIAllocator &alloc,
                 ObFTCacheRangeContainer *range_container,

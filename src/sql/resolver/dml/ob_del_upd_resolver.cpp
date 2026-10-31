@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "ob_del_upd_resolver.h"
+#include "share/ai_service/ai_column_guard.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/resolver/dml/ob_insert_stmt.h"
@@ -511,6 +512,7 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
     } else if (OB_ISNULL(table_schema)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("fail to get table schema", KPC(table_item), K(table_schema));
+    } else if (OB_FAIL(invalidate_ai_columns(assigns, i, *table_item, *table_schema))) {
     } else if (OB_FAIL(table_schema->has_before_update_row_trigger(*schema_guard, trigger_exist))) {
     } else if (OB_FAIL(generate_wrapper_expr_for_assignemnts(assigns.at(i).assignments_, trigger_exist))) {
     } else if (OB_FAIL(check_update_vector_col_with_vector_index(table_schema,
@@ -623,6 +625,80 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
 }
 
 // duplicated assignments are permitted, such SET c2=c1*2, c2=1+c2.
+int ObDelUpdResolver::invalidate_ai_columns(ObIArray<ObTableAssignment> &assigns,
+    int64_t table_index, const TableItem &table, const ObTableSchema &schema,
+    uint64_t retry_column)
+{
+  int ret = OB_SUCCESS;
+  // Only the dedicated background worker may publish results. PL sessions are
+  // user sessions too and must take the ordinary invalidation path.
+  if (!session_info_->is_user_session() && share::ColumnExecutionScope::active()) { return ret; }
+  const int64_t original_count = assigns.at(table_index).assignments_.count();
+  ObSysFunRawExpr *request = nullptr;
+  for (auto it = schema.column_begin(); OB_SUCC(ret) && it != schema.column_end(); ++it) {
+    const ObColumnSchemaV2 &column = **it;
+    if (!column.is_ai_column()) { continue; }
+    ObSEArray<uint64_t, 4> dependencies;
+    bool affected = retry_column == column.get_column_id();
+    if (OB_FAIL(column.get_ai_dependencies(dependencies))) {
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && !affected && j < original_count; ++j) {
+      const uint64_t id = assigns.at(table_index).assignments_.at(j).column_expr_->get_column_id();
+      const ObColumnSchemaV2 *changed = schema.get_column_schema(id);
+      affected = has_exist_in_array(dependencies, id)
+          || (changed != nullptr && changed->is_rowkey_column());
+    }
+    if (!affected) { continue; }
+    const uint64_t ids[] = {column.get_column_id(), column.get_ai_state_column_id(),
+        column.get_ai_request_column_id(), column.get_ai_result_spec_column_id()};
+    for (int64_t field = 0; OB_SUCC(ret) && field < 4; ++field) {
+      const ObColumnSchemaV2 *target = schema.get_column_schema(ids[field]);
+      ObSEArray<ObColumnRefRawExpr *, 1> columns;
+      ObAssignment assignment;
+      ObConstRawExpr *constant = nullptr;
+      if (OB_ISNULL(target)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(add_column_to_stmt(table, *target, columns))) {
+      } else if (columns.empty()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (field == 2) {
+        if (request == nullptr && OB_FAIL(params_.expr_factory_->create_raw_expr(T_FUN_SYS_UUID, request))) {
+        } else if (OB_FAIL(request->formalize(session_info_))) {
+        } else {
+          assignment.expr_ = request;
+        }
+      } else {
+        ObObj value;
+        if (field == 1) {
+          value.set_varchar("PENDING");
+          value.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+        } else {
+          value.set_null();
+        }
+        if (OB_FAIL(params_.expr_factory_->create_raw_expr(
+            field == 1 ? T_VARCHAR : T_NULL, constant))) {
+        } else {
+          constant->set_value(value);
+          assignment.expr_ = constant;
+          ret = assignment.expr_->formalize(session_info_);
+        }
+      }
+      if (OB_SUCC(ret)) {
+        assignment.column_expr_ = columns.at(0);
+        assignment.is_implicit_ = true;
+        if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+            *params_.allocator_, *assignment.column_expr_, assignment.expr_, session_info_))) {
+        } else {
+          // These are independent internal assignments. Do not substitute
+          // earlier user assignments into the per-row UUID expression.
+          ret = assigns.at(table_index).assignments_.push_back(assignment);
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDelUpdResolver::add_assignment(common::ObIArray<ObTableAssignment> &assigns,
                                      const TableItem *table_item,
                                      const ColumnItem *col,
@@ -1828,6 +1904,21 @@ int ObDelUpdResolver::generate_column_conv_function(ObInsertTableInfo &table_inf
       } else if (OB_FAIL(build_column_conv_function_with_value_desc(table_info, i, column_ref))) {
       }
     } //end for
+    const ObTableSchema *schema = nullptr;
+    ObRawExpr *group_request = nullptr;
+    if (OB_SUCC(ret) && OB_FAIL(schema_checker_->get_table_schema(table_info.ref_table_id_, schema))) {}
+    if (OB_SUCC(ret) && schema != nullptr) {
+      ObSEArray<uint64_t, 4> requests;
+      for (auto it = schema->column_begin(); OB_SUCC(ret) && it != schema->column_end(); ++it) {
+        if ((*it)->is_ai_column()) { ret = requests.push_back((*it)->get_ai_request_column_id()); }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < table_info.column_exprs_.count(); ++i) {
+        if (has_exist_in_array(requests, table_info.column_exprs_.at(i)->get_column_id())) {
+          if (group_request == nullptr) { group_request = table_info.column_conv_exprs_.at(i); }
+          else { table_info.column_conv_exprs_.at(i) = group_request; }
+        }
+      }
+    }
   }
   return ret;
 }

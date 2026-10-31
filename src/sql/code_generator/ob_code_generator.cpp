@@ -20,18 +20,55 @@
 #include "sql/code_generator/ob_code_generator.h"
 #include "sql/code_generator/ob_static_engine_cg.h"
 #include "sql/engine/ob_physical_plan.h"
+#include "sql/resolver/dml/ob_stmt_expr_visitor.h"
+#include "sql/resolver/expr/ob_raw_expr_util.h"
 
 namespace oceanbase
 {
 namespace sql
 {
 
+namespace
+{
+int collect_ai_reads(const ObDMLStmt &statement, common::ObIArray<uint64_t> &columns, int64_t depth = 0)
+{
+  int ret = OB_SUCCESS;
+  if (depth >= 256) { return OB_SIZE_OVERFLOW; }
+  // Column inventories also contain implicit INSERT targets and the old values
+  // needed for index maintenance. Only expression reads participate in strict mode.
+  ObStmtExprGetter visitor;
+  visitor.set_relation_scope();
+  visitor.remove_scope(SCOPE_DML_COLUMN);
+  common::ObSEArray<ObRawExpr *, 16> expressions;
+  common::ObSEArray<ObRawExpr *, 8> references;
+  if (OB_FAIL(statement.get_relation_exprs(expressions, visitor))) {}
+  else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(expressions, references))) {}
+  for (int64_t i = 0; OB_SUCC(ret) && i < references.count(); ++i) {
+    const auto *column = static_cast<const ObColumnRefRawExpr *>(references.at(i));
+    const TableItem *table = statement.get_table_item_by_id(column->get_table_id());
+    if (table == nullptr || !table->is_basic_table()
+        || !(column->get_column_flags() & AI_COLUMN_FLAG)) { continue; }
+    if (OB_FAIL(columns.push_back(table->ref_id_))) {}
+    else { ret = columns.push_back(column->get_column_id()); }
+  }
+  common::ObSEArray<ObSelectStmt *, 4> children;
+  if (OB_SUCC(ret)) { ret = statement.get_child_stmts(children); }
+  for (int64_t i = 0; OB_SUCC(ret) && i < children.count(); ++i) {
+    ret = collect_ai_reads(*children.at(i), columns, depth + 1);
+  }
+  return ret;
+}
+}
+
 int ObCodeGenerator::generate(const ObLogPlan &log_plan,
                               ObPhysicalPlan &phy_plan)
 {
   int ret = OB_SUCCESS;
   int64_t batch_size = 0;
+  common::ObSEArray<uint64_t, 8> ai_reads;
   OZ(detect_batch_size(log_plan, batch_size));
+  OZ(collect_ai_reads(*log_plan.get_stmt(), ai_reads));
+  OZ(phy_plan.get_ai_read_columns().assign(ai_reads));
   if (OB_SUCC(ret) && batch_size > 0) {
     log_plan.get_optimizer_context().set_batch_size(batch_size);
     phy_plan.set_batch_size(batch_size);

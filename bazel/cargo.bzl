@@ -55,6 +55,9 @@ def cargo_action(ctx, command, sources, outputs, work_dir, env = {}, extra_input
     if type(command) == "list":
         arguments += command
     else:
+        # A Windows checkout can contribute CRLFs to Starlark string literals.
+        # Bash treats the CR as part of the value in shell assignments.
+        command = command.replace("\r\n", "\n")
         arguments += ["/bin/bash", "-c", "set -eu\n" + command, "cargo-action"] + kwargs.pop("arguments", [])
     ctx.actions.run(
         executable = toolchain.python,

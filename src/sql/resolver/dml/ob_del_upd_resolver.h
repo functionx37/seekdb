@@ -72,6 +72,10 @@ protected:
 
   int resolve_additional_assignments(common::ObIArray<ObTableAssignment> &table_assigns,
                                      const ObStmtScope scope);
+  int invalidate_ai_columns(common::ObIArray<ObTableAssignment> &table_assigns,
+                            int64_t table_index, const TableItem &table,
+                            const share::schema::ObTableSchema &schema,
+                            uint64_t retry_column = 0);
   int generate_wrapper_expr_for_assignemnts(common::ObIArray<ObAssignment> &assigns,
                                             bool has_before_trigger);
 

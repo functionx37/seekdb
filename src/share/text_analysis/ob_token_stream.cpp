@@ -295,8 +295,33 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
-      } else {
+      // UTF-8 ASCII tokens need no charset conversion. Keep the generic path
+      // for non-ASCII and for collations whose byte encoding differs.
+      bool ascii = cs_->number == CS_TYPE_UTF8MB4_BIN
+          || cs_->number == CS_TYPE_UTF8MB4_GENERAL_CI
+          || cs_->number == CS_TYPE_UTF8MB4_UNICODE_CI;
+      bool uppercase = false;
+      for (uint32_t i = 0; ascii && i < norm_token_len; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(norm_token_ptr[i]);
+        ascii = ch < 0x80;
+        uppercase = uppercase || (ch >= 'A' && ch <= 'Z');
+      }
+      if (ascii && !uppercase) {
+        norm_lower_token = norm_alnum_token;
+      } else if (ascii) {
+        char *lower = static_cast<char *>(norm_allocator_.alloc(norm_token_len));
+        if (OB_ISNULL(lower)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          for (uint32_t i = 0; i < norm_token_len; ++i) {
+            const char ch = norm_token_ptr[i];
+            lower[i] = ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch;
+          }
+          norm_lower_token.assign_ptr(lower, norm_token_len);
+        }
+      } else if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      }
+      if (OB_SUCC(ret)) {
         next_token.set_string(norm_lower_token);
       }
     }

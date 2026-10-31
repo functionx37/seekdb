@@ -340,7 +340,15 @@ all_column_def = dict(
       ('sub_data_type', 'int', 'false', '0'),
       ('skip_index_attr', 'int', 'false', '0'),
       ('lob_chunk_size', 'int', 'false', 'OB_DEFAULT_LOB_CHUNK_SIZE'),
-      ('local_session_vars', 'longtext', 'true')
+      ('local_session_vars', 'longtext', 'true'),
+      ('ai_expression', 'longtext', 'true'),
+      ('ai_normalized_expr', 'longtext', 'true'),
+      ('ai_dependency_ids', 'varchar:65535', 'true'),
+      ('ai_max_retries', 'int', 'false', '2'),
+      ('ai_definition_version', 'int', 'false', '1'),
+      ('ai_state_column_id', 'int', 'false', '0'),
+      ('ai_request_column_id', 'int', 'false', '0'),
+      ('ai_result_spec_column_id', 'int', 'false', '0')
   ]
   )
 
@@ -13525,6 +13533,41 @@ def_table_schema(
       RESPONSE_TRANSFORM_FN
     FROM oceanbase.__all_ai_model_endpoint WHERE ENDPOINT_ID != -1;
   """.replace("\n", " ")
+)
+
+def_table_schema(
+    owner = 'seekdb',
+    table_name = '__all_ai_column',
+    table_id = '21665',
+    table_type = 'SYSTEM_VIEW',
+    rowkey_columns = [],
+    normal_columns = [],
+    gm_columns = [],
+    view_definition = """
+      SELECT table_id, column_id, column_name,
+             ai_expression AS expression,
+             ai_normalized_expr AS normalized_expr,
+             ai_dependency_ids AS dependency_column_ids,
+             ai_max_retries AS max_retries,
+             ai_definition_version AS definition_version,
+             ai_state_column_id AS state_column_id,
+             ai_request_column_id AS request_column_id,
+             ai_result_spec_column_id AS result_spec_column_id,
+             'async' AS sync_mode
+      FROM oceanbase.__all_column WHERE (column_flags & 16) != 0
+    """.replace("\n", " ")
+)
+
+def_table_schema(
+    owner = 'seekdb',
+    table_name = '__all_ai_column_task',
+    table_id = '21666',
+    table_type = 'SYSTEM_VIEW',
+    rowkey_columns = [],
+    normal_columns = [],
+    gm_columns = [],
+    # The resolver expands this live view over the durable hidden row state.
+    view_definition = "SELECT CAST(NULL AS UNSIGNED) AS table_id, CAST(NULL AS UNSIGNED) AS column_id, CAST(NULL AS CHAR(64)) AS request_id, CAST(NULL AS CHAR(4096)) AS rowkey_predicate, NOW(6) AS eligible_ts, 0 AS state, 0 AS retry_count WHERE FALSE"
 )
 
 def_table_schema(

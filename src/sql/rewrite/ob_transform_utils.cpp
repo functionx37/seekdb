@@ -11200,7 +11200,7 @@ int ObTransformUtils::get_columnitem_from_json_table(ObDMLStmt *stmt,
       ObJtColBaseInfo* col_info = jt_def->all_cols_.at(i);
       if (OB_ISNULL(col_info)) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (col_info->col_type_ != NESTED_COL_TYPE) {
+      } else if (col_info->col_type_ != NESTED_COL_TYPE && col_info->col_type_ != COL_TYPE_FILE_ROOT) {
         ColumnItem* col_item = stmt->get_column_item_by_id(tmp_table_item->table_id_, col_info->output_column_idx_);
         if (OB_ISNULL(col_item)) {
           ret = OB_ERR_UNEXPECTED;
